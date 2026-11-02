@@ -56,4 +56,4 @@ environment, as described in the port documentation.
 
 Based on [tsryzenstech/hmos2sweet](https://github.com/tsryzenstech/hmos2sweet),
 with OP13-specific adaptations. Component origins and licenses are listed in
-[NOTICE.md](NOTICE.md); see also [LICENSE](LICENSE) and [LICENSES/](LICENSES/).
+[NOTICE.md](NOTICE.md); see also [LICENSE](LICENSE).
