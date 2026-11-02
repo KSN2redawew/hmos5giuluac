@@ -7,6 +7,9 @@
 | `src/preinit`, `prebuilt/ramdisk/init`, `prebuilt/tools/lpwrite` | this project | GPL-2.0 |
 | `src/display`, `patches/10-display/files` | derived from OpenHarmony drivers_peripheral (display) | Apache-2.0 |
 | `src/display/hdi-gen` | headers generated from OpenHarmony HDI IDLs | Apache-2.0 |
+| `op13/display` | OP13 adaptations of the upstream OpenHarmony-derived display implementation and generated HDI headers | Apache-2.0 |
+| `op13` (except the files listed separately below) | OP13 port tooling, DSU handoff, storage integration and offline checks | Apache-2.0 |
+| `op13/stock_probe.c`, `op13/build_probe.sh` | read-only stock-kernel diagnostic | MIT |
 | `src/audio/vdi` | OpenHarmony drivers_peripheral audio VDI headers | Apache-2.0 |
 | `src/audio/sweet_audio_vdi.cpp`, `patches/31-audio/files` | this project, with tinyalsa (BSD-3-Clause) | Apache-2.0 |
 | `src/huks`, `patches/21-huks-software/files` | OpenHarmony security_huks, OpenSSL 3 | Apache-2.0 |

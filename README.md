@@ -1,4 +1,24 @@
-# hmos2sweet
+# hmos5dodge
+
+Experimental **HarmonyOS NEXT 5 port for OnePlus 13**, using the stock kernel
+and separate DSU partition images. Forked from
+[tsryzenstech/hmos2sweet](https://github.com/tsryzenstech/hmos2sweet).
+
+The OP13 implementation, build notes and manual test instructions are in
+[op13/README.md](op13/README.md). The port uses an OP13 vendor base with selected
+native HarmonyOS runtime additions and the stock ODM filesystem. No kernel,
+bootloader or physical firmware image is replaced by its DSU package.
+
+**Status: offline candidate validated; OP13 boot and hardware operation remain
+unverified.** Source is included here; ROM images, device captures and signing
+keys remain local.
+
+The documentation below describes the original **Redmi Note 10 Pro** project.
+Its working-feature table describes upstream's Redmi results, not OP13 results.
+
+---
+
+## Upstream project: hmos2sweet
 
 **HarmonyOS 5 (OpenHarmony) for the Redmi Note 10 Pro (sweet).**
 

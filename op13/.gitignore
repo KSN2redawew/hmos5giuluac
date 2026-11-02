@@ -1,0 +1,14 @@
+# Local outputs and private inputs are never part of the port source.
+__pycache__/
+*.py[cod]
+*.o
+*.a
+*.so
+*.img
+*.zip
+*.pem
+*.key
+*.jsonl
+*.log
+out/
+work/
