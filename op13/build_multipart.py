@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import zipfile
+from image_utils import check_filesystem
 
 
 def digest(path):
@@ -21,6 +22,31 @@ def digest(path):
 
 def command(*args):
     subprocess.run([str(a) for a in args], check=True)
+
+
+def sign_image(image, name, key, compatibility):
+    size = ((int(image.stat().st_size * 1.02) + 4 * 1024**2 - 1) // (4 * 1024**2)) * (4 * 1024**2)
+    command('avbtool', 'add_hashtree_footer', '--image', image, '--partition_name', name,
+        '--partition_size', size, '--do_not_generate_fec', '--hash_algorithm', 'sha256',
+        '--algorithm', 'SHA256_RSA4096', '--key', key,
+        '--prop', 'com.android.build.' + name + '.os_version:' + compatibility['release'],
+        '--prop', 'com.android.build.' + name + '.security_patch:' + compatibility['security_patch'])
+    command('avbtool', 'verify_image', '--image', image, '--key', key)
+    check_filesystem(image)
+    return {'file': image.name, 'bytes': image.stat().st_size, 'sha256': digest(image)}
+
+
+def write_package(output, images):
+    package = output / 'hmos5-op13-dsu.zip'
+    partial = output / 'hmos5-op13-dsu.zip.partial'
+    with zipfile.ZipFile(partial, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as archive:
+        for image in images.values():
+            archive.write(image, image.name)
+    with zipfile.ZipFile(partial) as archive:
+        if archive.namelist() != [image.name for image in images.values()] or archive.testzip() is not None:
+            raise RuntimeError('multipart ZIP verification failed')
+    partial.rename(package)
+    return {'file': package.name, 'bytes': package.stat().st_size, 'sha256': digest(package)}
 
 
 def metadata(workspace, kind, partition):
@@ -94,8 +120,11 @@ def main():
     parser.add_argument('--android-sdk', required=True)
     parser.add_argument('--host-security-patch', required=True)
     parser.add_argument('--vendor-additions', type=Path, required=True)
+    parser.add_argument('--dlkm-audit', type=Path, required=True)
     args = parser.parse_args()
+    from prepare_dlkm import load_report, write_load_plan
     workspace, output = args.workspace.resolve(), args.output.resolve()
+    dlkm = load_report(workspace, args.dlkm_audit)
     if not output.is_relative_to(workspace / 'out') or (output.exists() and any(output.iterdir())):
         parser.error('use a new empty workspace/out directory')
     if not re.fullmatch(r'\d{4}-\d\d-\d\d', args.host_security_patch):
@@ -146,15 +175,9 @@ def main():
     assert after == ['libop13_local_storage.so'] + previous
     shutil.copyfile(workspace / 'out/op13-storage/libop13_local_storage.so', stage / 'system/lib64/libop13_local_storage.so')
     shutil.copyfile(workspace / 'work/inspect/sweet-oobedone', stage / 'system/bin/hmos-oobedone')
-    modules = json.loads((workspace / 'out/stock-dsu-audit/graphics-modules.json').read_text())
-    assert not modules['conflicting_module_bytes'] and not modules['unresolved_hard_dependencies']
-    order = []
-    for entry in modules['closure']:
-        if not re.fullmatch(r'[A-Za-z0-9_]+', entry['name']) or digest(workspace / entry['path']) != entry['sha256']:
-            raise RuntimeError('module changed: ' + entry['name'])
-        shutil.copyfile(workspace / entry['path'], stage / 'hmos/modules' / (entry['name'] + '.ko'))
-        order.append(entry['name'])
-    (stage / 'hmos/modules/load-order').write_text('\n'.join(order) + '\n')
+    write_load_plan(workspace, stage, dlkm)
+    (stage / 'system/lib').mkdir(exist_ok=True)
+    (stage / 'system/lib/modules').symlink_to('/system_dlkm/lib/modules')
     props = ('# OP13 port DSU compatibility metadata; not HMOS Android security fixes.\n'
         'ro.product.cpu.abi=arm64-v8a\nro.product.cpu.abilist=arm64-v8a\n'
         f'ro.system.build.version.release={args.android_release}\nro.system.build.version.sdk={args.android_sdk}\n'
@@ -176,7 +199,8 @@ def main():
         ('/hmos/startup/hdf_default\\.hcb', 'chip_prod_file'), ('/hmos/display(/.*)?', 'vendor_lib_file'),
         ('/hmos/ui(/.*)?', 'sys_prod_file'), ('/hmos/policy(/.*)?', 'vendor_etc_file'),
         ('/hmos/init-modules(/.*)?', 'system_lib_file'), ('/system/bin/(init|hmos-native-init)', 'init_exec'),
-        ('/system/bin/hmos-oobedone', 'system_bin_file'), ('/system/lib64/libop13_local_storage\\.so', 'system_lib_file')])}
+        ('/system/bin/hmos-oobedone', 'system_bin_file'), ('/system/lib/modules', 'system_lib_file'),
+        ('/system/lib64/libop13_local_storage\\.so', 'system_lib_file')])}
     vendor_stage = output / 'vendor-patch'
     shutil.copytree(args.vendor_additions / 'tree', vendor_stage)
     owners, labels = metadata(workspace, 'stock', 'vendor')
@@ -198,8 +222,9 @@ def main():
         specials.append((re.escape(path), label.split(':')[2]))
     images['vendor'] = patch_image(workspace, output, 'vendor', workspace / 'op13_stock/vendor.img',
                                   vendor_stage, owners, labels, specials, full=True)
-    sources = {'odm': 'op13_stock/odm.img', 'sys_prod': 'hmos5/sys_prod.img',
+    sources = {'sys_prod': 'hmos5/sys_prod.img',
         'chip_prod': 'hmos5/chip_prod.img', 'cust': 'hmos5/cust.img', 'patch_hw': 'hmos5/patch.img'}
+    sources.update({name: row['source'] for name, row in dlkm['images'].items()})
     for name, source in sources.items():
         images[name] = output / (name + '.img')
         shutil.copyfile(workspace / source, images[name])
@@ -211,42 +236,29 @@ def main():
     records = {}
     for name, image in images.items():
         print('Signing and checking separate', name, flush=True)
-        size = ((int(image.stat().st_size * 1.02) + 4 * 1024**2 - 1) // (4 * 1024**2)) * (4 * 1024**2)
-        command('avbtool', 'add_hashtree_footer', '--image', image, '--partition_name', name,
-            '--partition_size', size, '--do_not_generate_fec', '--hash_algorithm', 'sha256',
-            '--algorithm', 'SHA256_RSA4096', '--key', key,
-            '--prop', 'com.android.build.' + name + '.os_version:' + args.android_release,
-            '--prop', 'com.android.build.' + name + '.security_patch:' + args.host_security_patch)
-        command('avbtool', 'verify_image', '--image', image, '--key', key)
-        command('fsck.erofs', image)
-        records[name] = {'file': image.name, 'bytes': image.stat().st_size, 'sha256': digest(image)}
-    package = output / 'hmos5-op13-dsu.zip'
+        records[name] = sign_image(image, name, key, {'release': args.android_release, 'security_patch': args.host_security_patch})
     print('Writing multipart DSU ZIP', flush=True)
-    with zipfile.ZipFile(package, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as archive:
-        for name, image in images.items():
-            archive.write(image, image.name)
-    with zipfile.ZipFile(package) as archive:
-        assert archive.namelist() == [image.name for image in images.values()]
-        assert archive.testzip() is None
+    package = write_package(output, images)
     report = {'status': 'experimental-op13-only-multipart-dsu', 'phone_boot_tested': False,
         'kernel_modified': False, 'physical_partitions_written': False,
         'vendor_base': 'op13_stock/vendor.img', 'whole_donor_vendor_used': False,
-        'odm_filesystem_base': 'op13_stock/odm.img; filesystem unchanged, development AVB footer on output copy',
-        'partitions': records, 'zip': {'file': package.name, 'bytes': package.stat().st_size, 'sha256': digest(package)},
+        'odm_source': 'Reuse the existing mounted stock ODM EROFS read-only; no ODM partition in the ZIP',
+        'dlkm_inputs': dlkm['images'], 'module_load_plan': dlkm['load_plan'],
+        'partitions': records, 'zip': package,
         'component_validation': validation, 'vendor_additions': vendor,
         'android_compatibility_metadata': {'release': args.android_release, 'sdk': args.android_sdk,
             'security_patch': args.host_security_patch, 'does_not_assert_hmos_android_security_fixes': True},
         'arb': 'No firmware/bootloader/vbmeta/boot/vendor_boot/dtbo images included. Device rollback state and AVB acceptance unverified.',
         'stock_vendor_existing_file_contents_replaced': False,
         'vendor_directory_labels_adapted_for_native_policy': True,
-        'known_unverified': ['Android first-stage mounting all seven DSU partitions',
+        'known_unverified': ['Android first-stage mounting all eight DSU partitions and providing stock ODM',
             'BPF attachment, native policy and additional denials', 'module/firmware and display hardware behavior',
             'missing donor libinput_driver.z.so; native input and touch need investigation',
             'access-token semantics, fscrypt, code signing, full SceneBoard startup and peripherals']}
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
     (output / 'SHA256SUMS').write_text(''.join(record['sha256'] + '  ' + record['file'] + '\n'
         for record in list(records.values()) + [report['zip']]))
-    print(json.dumps({'package': str(package), 'partitions': list(images), 'phone_boot_tested': False}, indent=2))
+    print(json.dumps({'package': str(output / package['file']), 'partitions': list(images), 'phone_boot_tested': False}, indent=2))
 
 
 if __name__ == '__main__':

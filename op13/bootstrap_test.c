@@ -42,6 +42,13 @@ int main(void)
 {
     assert(dm_name_valid("dm-0") && dm_name_valid("dm-987"));
     assert(!dm_name_valid("dm-") && !dm_name_valid("userdata") && !dm_name_valid("dm-1/../sda"));
+    assert(module_path_valid("/vendor_dlkm/lib/modules/msm_drm.ko"));
+    assert(module_path_valid("/system_dlkm/lib/modules/kernel/crypto/example.ko"));
+    assert(module_path_valid("/hmos/modules/qcom_scm.ko"));
+    assert(!module_path_valid("/dev/block/sda"));
+    assert(!module_path_valid("/vendor_dlkm/lib/modules/../../bad.ko"));
+    assert(!module_path_valid("/vendor_dlkm/lib/modules//bad.ko"));
+    assert(!module_path_valid("/vendor_dlkm/lib/modules/example.so"));
     devices[0] = (struct device){226, 0};
     devices[1] = (struct device){511, 7};
     device_count = 2;

@@ -22,6 +22,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <sys/vfs.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/wait.h>
@@ -180,23 +181,39 @@ static dev_t find_dsu_data(void)
     return data;
 }
 
+static bool module_path_valid(const char *path)
+{
+    const char *prefixes[] = {"/vendor_dlkm/lib/modules/", "/system_dlkm/lib/modules/", "/hmos/modules/"};
+    bool prefix = false;
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
+        if (!strncmp(path, prefixes[i], strlen(prefixes[i]))) prefix = true;
+    size_t length = strlen(path);
+    if (!prefix || length < 4 || strcmp(path + length - 3, ".ko") || strstr(path, "..") || strstr(path, "//")) return false;
+    for (const char *p = path; *p; ++p)
+        if (!( (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+               (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.' || *p == '/')) return false;
+    return true;
+}
+
 static void load_stock_modules(void)
 {
     FILE *list = fopen("/hmos/modules/load-order", "re");
     if (!list) fatal("stock module order");
-    char name[128];
-    while (fgets(name, sizeof(name), list)) {
-        name[strcspn(name, "\r\n")] = 0;
-        if (!name[0]) continue;
+    char line[640], name[128], source[384], extra;
+    while (fgets(line, sizeof(line), list)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!line[0]) continue;
+        if (sscanf(line, "%127s %383s %c", name, source, &extra) != 2 || !module_path_valid(source)) {
+            errno = EINVAL; fatal("invalid module source path");
+        }
         for (const char *p = name; *p; ++p)
             if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
                   (*p >= '0' && *p <= '9') || *p == '_')) { errno = EINVAL; fatal("module name"); }
         char path[256];
         snprintf(path, sizeof(path), "/sys/module/%s", name);
         if (!access(path, F_OK)) continue;
-        snprintf(path, sizeof(path), "/hmos/modules/%s.ko", name);
-        int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0) fatal(path);
+        int fd = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (fd < 0) fatal(source);
         int result = syscall(__NR_finit_module, fd, "", 0); // no force flags
         int saved = errno;
         close(fd);
@@ -481,7 +498,7 @@ int main(int argc, char **argv)
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) fatal("private mount propagation");
     directory(root, 0755);
     if (mount("tmpfs", root, "tmpfs", MS_NOSUID, "mode=0755")) fatal("new root");
-    const char *dirs[] = {"/system", "/vendor", "/odm",
+    const char *dirs[] = {"/system", "/vendor", "/odm", "/vendor_dlkm", "/system_dlkm",
         "/chip_prod", "/sys_prod", "/cust", "/patch_hw", "/data", "/dev", "/proc", "/sys",
         "/mnt", "/tmp", "/log", "/config", "/storage", "/sec_storage", "/module_update",
         "/preload", "/version", "/updater", "/eng_chipset", "/eng_system"};
@@ -489,7 +506,20 @@ int main(int argc, char **argv)
     dsu_bind("/system", "/system", "system_gsi");
     root_bind("/system/bin/hmos-native-init", "/system/bin/init", true);
     dsu_bind("/vendor", "/vendor", "vendor_gsi");
-    dsu_bind("/odm", "/odm", "odm_gsi");
+    dsu_bind("/vendor_dlkm", "/vendor_dlkm", "vendor_dlkm_gsi");
+    dsu_bind("/system_dlkm", "/system_dlkm", "system_dlkm_gsi");
+    // Reuse Android's already mounted, intrinsically read-only OP13 ODM.
+    // It is not supplied as a DSU partition and is never opened for writing.
+    struct statvfs odm_flags;
+    struct statfs odm_fs;
+    struct stat odm_st, system_st;
+    if (statvfs("/odm", &odm_flags) || !(odm_flags.f_flag & ST_RDONLY) ||
+        statfs("/odm", &odm_fs) || (unsigned long)odm_fs.f_type != 0xe0f5e1e2UL ||
+        stat("/odm", &odm_st) || stat("/system", &system_st) || odm_st.st_dev == system_st.st_dev) {
+        errno = ENODEV; fatal("mounted read-only stock ODM EROFS required");
+    }
+    root_bind("/odm", "/odm", true);
+    log_line("bound existing stock ODM read-only; no ODM image in DSU package");
     char target[512];
     dsu_bind("/chip_prod", "/chip_prod", "chip_prod_gsi");
     dsu_bind("/sys_prod", "/sys_prod", "sys_prod_gsi");

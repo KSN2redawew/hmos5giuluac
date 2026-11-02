@@ -11,6 +11,7 @@ import struct
 import subprocess
 import zipfile
 from build_multipart import digest
+from image_utils import filesystem_info
 
 
 def remove_readback(target, output):
@@ -23,12 +24,7 @@ def remove_readback(target, output):
 
 
 def fs_bytes(path):
-    with path.open('rb') as file:
-        file.seek(1024)
-        header = file.read(128)
-    if header[:4] != b'\xe2\xe1\xf5\xe0':
-        raise RuntimeError('not EROFS: ' + str(path))
-    return (1 << header[12]) * struct.unpack_from('<I', header, 36)[0]
+    return filesystem_info(path)['bytes']
 
 
 def equal_prefix(original, candidate, start, end):
@@ -67,8 +63,13 @@ def main():
     report = json.loads((out / 'manifest.json').read_text())
     assert report['status'] == 'experimental-op13-only-multipart-dsu'
     sources = {'system': 'hmos5/system.img', 'vendor': 'op13_stock/vendor.img',
-        'odm': 'op13_stock/odm.img', 'sys_prod': 'hmos5/sys_prod.img',
+        'sys_prod': 'hmos5/sys_prod.img',
         'chip_prod': 'hmos5/chip_prod.img', 'cust': 'hmos5/cust.img', 'patch_hw': 'hmos5/patch.img'}
+    for name, row in report['dlkm_inputs'].items():
+        if digest(Path(row['source'])) != row['sha256']:
+            raise RuntimeError('DLKM input changed: ' + name)
+        sources[name] = row['source']
+    assert set(sources) == {'system', 'vendor', 'sys_prod', 'chip_prod', 'cust', 'patch_hw', 'vendor_dlkm', 'system_dlkm'}
     payload_checks = {}
     for name, source in sources.items():
         image = out / (name + '.img')
@@ -79,7 +80,8 @@ def main():
             continue
         start = 0
         equal_prefix(root / source, image, start, fs_bytes(root / source))
-        payload_checks[name] = {'original_erofs_bytes_verified': fs_bytes(root / source) - start,
+        payload_checks[name] = {'original_filesystem_bytes_verified': fs_bytes(root / source) - start,
+                               'filesystem': filesystem_info(root / source)['type'],
                                'superblock_changed_by_incremental_build': bool(start)}
         print('PASS original filesystem payload retained:', name, flush=True)
     sys_owners, sys_labels = read_metadata(root, out, 'system')
@@ -133,9 +135,14 @@ def main():
         if sys_owners[path][2] != mode or sys_labels[path] != 'u:object_r:' + label + ':s0':
             raise RuntimeError('incorrect packed system mode/label: ' + path)
     for name in ('dev', 'proc', 'sys', 'mnt', 'metadata', 'debug_ramdisk', 'second_stage_resources',
-                 'first_stage_ramdisk', 'vendor', 'odm', 'sys_prod', 'chip_prod', 'cust', 'patch_hw'):
+                 'first_stage_ramdisk', 'vendor', 'odm', 'sys_prod', 'chip_prod', 'cust', 'patch_hw',
+                 'vendor_dlkm', 'system_dlkm'):
         subprocess.run(['dump.erofs', '--path=/' + name, str(out / 'system.img')],
             check=True, stdout=subprocess.DEVNULL)
+    assert (after / 'system/lib/modules').is_symlink()
+    assert str((after / 'system/lib/modules').readlink()) == '/system_dlkm/lib/modules'
+    lines = (after / 'hmos/modules/load-order').read_text().splitlines()
+    assert lines == [row['name'] + ' ' + row['runtime_path'] for row in report['module_load_plan']]
     original_owners = {}
     for line in (root / 'out/vendor-layout/stock/config/vendor_fs_config').read_text().splitlines():
         row = line.split()
@@ -162,17 +169,20 @@ def main():
     assert digest(package) == report['zip']['sha256']
     with zipfile.ZipFile(package) as archive:
         assert set(archive.namelist()) == {name + '.img' for name in sources}
-        assert not any(name in archive.namelist() for name in ('boot.img', 'vendor_boot.img', 'dtbo.img', 'vbmeta.img'))
+        assert not any(name in archive.namelist() for name in ('odm.img', 'boot.img', 'vendor_boot.img', 'dtbo.img', 'vbmeta.img'))
     originals = json.loads((root / 'out/stock-dsu-audit/report.json').read_text())['images']
     for name, entry in originals.items():
         assert digest(root / name) == entry['sha256'], name
+    for row in report['dlkm_inputs'].values():
+        assert digest(Path(row['source'])) == row['sha256']
     result = {'passed': True, 'original_input_images_unchanged': len(originals),
         'partition_payload_checks': payload_checks, 'system_mode_label_checks': len(expected),
         'stock_vendor_metadata_entries_checked': len(original_owners),
         'native_vendor_addition_checks': len(report['vendor_additions']['files']),
         'op13_vendor_file_contents_or_symlinks_preserved': len(base),
         'unmodified_system_file_contents_or_symlinks_preserved': system_files_checked,
-        'zip_exactly_seven_partition_images': True,
+        'dlkm_input_images_unchanged': len(report['dlkm_inputs']),
+        'zip_exactly_eight_partition_images': True, 'odm_image_omitted': True,
         'scope': 'Offline block retention, file metadata, hashes and archive membership; no device boot or ARB acceptance test'}
     (out / 'packed-validation.json').write_text(json.dumps(result, indent=2) + '\n')
     if not args.keep_extracted:

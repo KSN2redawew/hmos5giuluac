@@ -5,7 +5,7 @@ kernel and separate partitions installed through Android DSU.
 
 The port targets the native HarmonyOS framework, SceneBoard and SuperLauncher.
 It uses an OP13 stock vendor base with selected native HarmonyOS runtime
-additions and the stock OP13 ODM filesystem.
+additions, matching OP13 DLKM images and the phone's existing stock ODM filesystem.
 
 ## Status
 
@@ -25,13 +25,15 @@ additions and the stock OP13 ODM filesystem.
 | --- | --- |
 | `system.img` | HMOS5 with the OP13 boot handoff and runtime adaptations |
 | `vendor.img` | OP13 stock vendor with selected native HMOS additions |
-| `odm.img` | OP13 stock ODM filesystem |
+| `vendor_dlkm.img` | Current OP13 vendor kernel modules, unchanged |
+| `system_dlkm.img` | Current OP13 GKI modules, unchanged |
 | `sys_prod.img` | HMOS5 sys_prod |
 | `chip_prod.img` | HMOS5 chip_prod |
 | `cust.img` | HMOS5 cust |
 | `patch_hw.img` | HMOS5 patch |
 
-The images are packaged together as `hmos5-op13-dsu.zip`. Output copies receive
+The eight images are packaged together as `hmos5-op13-dsu.zip`. The phone's
+mounted stock ODM EROFS is reused read-only; `odm.img` is omitted. Output copies receive
 local development AVB signatures; device acceptance remains unverified.
 Bootloader, physical vbmeta, boot, vendor_boot, dtbo and firmware-partition
 images are outside this DSU package. OP13 anti-rollback constraints still apply.
@@ -44,6 +46,8 @@ inputs, validation scope, DSU installation steps and boot-log collection.
 The OP13 implementation is in [`op13/`](op13/). Its main tools are:
 
 - [`prepare_vendor.py`](op13/prepare_vendor.py): select native HMOS runtime additions.
+- [`prepare_dlkm.py`](op13/prepare_dlkm.py): inspect matching stock module images.
+- [`extend_with_dlkm.py`](op13/extend_with_dlkm.py): update an existing candidate with DLKM and omit ODM.
 - [`build_multipart.py`](op13/build_multipart.py): build separate partition images and a DSU ZIP.
 - [`verify_multipart.py`](op13/verify_multipart.py): check packed contents and input preservation.
 - [`validate_components.py`](op13/validate_components.py): run offline component checks.

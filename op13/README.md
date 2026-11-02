@@ -6,22 +6,27 @@ SuperLauncher. It is an experimental offline candidate: **no OP13 boot has
 been verified**. The kernel is unchanged.
 
 The local package is:
-`/home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-multipart/hmos5-op13-dsu.zip`.
-The previous single-image wrapper was retired at the owner's request.
+`/home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-with-dlkm/hmos5-op13-dsu.zip`.
+The earlier single-image and seven-part candidates have been superseded.
 
 ## Partition layout
 
-The ZIP contains seven separate raw EROFS images, with no nested ROM images:
+The ZIP contains eight separate raw filesystem images (EROFS and ext4), with no nested ROM images:
 
 | Image | Filesystem base and changes |
 | --- | --- |
 | `system.img` | Supplied HMOS system; native init handoff, isolated DSU storage, curated startup, storage shim and OP13 display/policy payloads. |
 | `vendor.img` | **OP13 stock vendor**, fully unpacked/rebuilt with explicitly selected native HMOS runtime additions. |
-| `odm.img` | OP13 stock ODM filesystem, unchanged. |
+| `vendor_dlkm.img` | Supplied current OP13 vendor modules in their unchanged ext4 filesystem. |
+| `system_dlkm.img` | Supplied current OP13 GKI modules in their unchanged EROFS filesystem. |
 | `sys_prod.img` | Supplied HMOS sys_prod filesystem, unchanged; initial UI overrides are bind-mounted during handoff. |
 | `chip_prod.img` | Supplied HMOS chip_prod filesystem, unchanged; curated HDF configuration is bind-mounted during handoff. |
 | `cust.img` | Supplied HMOS cust filesystem, unchanged. |
 | `patch_hw.img` | Supplied HMOS patch filesystem, unchanged; named for its native mountpoint. |
+
+The phone's existing `/odm` mount is reused read-only and must be EROFS.
+`odm.img` is omitted from the ZIP. The handoff stops if that stock mount is
+missing, writable, or just the system-image placeholder.
 
 Every **output copy** receives a local development AVB footer for its DSU
 partition name. Consequently, an unchanged filesystem does not mean its whole
@@ -67,7 +72,8 @@ partition mounts against their exact `*_gsi` mappings, allowing a single
 verified-device layer above each mapping. These names are Android's internal
 DSU convention, not a claim this port works on other devices.
 
-The bootstrap binds the mounted partition trees into a native root and starts
+The bootstrap binds all eight DSU partition trees and the read-only host ODM
+into a native root and starts
 the saved donor init as `/system/bin/init --second-stage 0`. It no longer loop
 mounts ROM images inside system.img and no longer overlays the whole donor
 vendor over OP13 vendor.
@@ -81,10 +87,15 @@ that denies all block-device access. Kernel attachment/namespace behavior
 still needs a phone test; failures stop the handoff. No automatic reboot timer
 is added.
 
-A dependency-ordered set of 120 stock modules is supplied separately from the
-vendor additions. Already loaded modules are skipped. Normal kernel ABI and
-signature checks remain enabled; no force flags are used. The module inventory
-checks module-to-module CRCs, not all exports of the currently running kernel.
+The current `vendor_dlkm` contains 464 modules, all byte-identical to the supplied
+October device capture. The supplied `system_dlkm` contains 96 GKI modules.
+The dependency-ordered 120-module graphics plan now reads 59 files directly from
+`vendor_dlkm`; 61 early modules remain available as copies from the supplied
+`vendor_boot` ramdisk. Already loaded modules are skipped. The standard
+`/system/lib/modules` link points at `/system_dlkm/lib/modules`. Normal kernel
+ABI and signature checks remain enabled, with no force flags. Module-to-module
+CRC checks and captured-file identity do not verify every live kernel export
+or prove that the running kernel accepts each module.
 
 The startup overlay retains the main native framework with its original
 users/domains, excludes donor physical-storage mounting and flashing/update
@@ -127,7 +138,7 @@ Select **hmos5-op13-dsu.zip**, rather than an individual system.img, in
 [DSU Sideloader](https://github.com/VegaBobo/DSU-Sideloader#how-to-use). It documents
 support for multipart DSU ZIPs. Keep automatic partition sizes and allocate
 separate DSU userdata, initially 16 GiB. The phone must already have an unlocked
-bootloader and enough free storage for all seven images, userdata and temporary
+bootloader and enough free storage for all eight images, userdata and temporary
 installation files. Keep the first attempt a one-shot boot.
 
 Save loader diagnostics before reboot. Native ADB/HDC USB is unverified.
@@ -166,10 +177,15 @@ python3 op13/validate_components.py
 python3 op13/prepare_vendor.py \
   --workspace /home/palaziks/hmosnext5_op13 \
   --output /home/palaziks/hmosnext5_op13/out/op13-vendor-additions-new
+python3 op13/prepare_dlkm.py \
+  --workspace /home/palaziks/hmosnext5_op13 \
+  --source-dir /home/palaziks/hmosnext5_op13/newfiles \
+  --output /home/palaziks/hmosnext5_op13/out/current-dlkm-audit-new
 python3 op13/build_multipart.py \
   --workspace /home/palaziks/hmosnext5_op13 \
   --output /home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-multipart-new \
   --vendor-additions /home/palaziks/hmosnext5_op13/out/op13-vendor-additions-new \
+  --dlkm-audit /home/palaziks/hmosnext5_op13/out/current-dlkm-audit-new/report.json \
   --android-release 17 --android-sdk 37 --host-security-patch 2026-10-05
 python3 op13/verify_multipart.py \
   --workspace /home/palaziks/hmosnext5_op13 \
@@ -190,8 +206,18 @@ input hashes. Full source-policy neverallow compilation is not claimed.
 
 `manifest.json`, `packed-validation.json`, `SHA256SUMS`, and the component logs
 record the actual scope. `development-key.pem` is a private local key, not an
-OEM key. Supplemental stock payload.bin was not needed for this candidate.
+OEM key. The July stock payload was inspected as a candidate DLKM source, but its vendor
+module import CRCs differ from the October capture. The current DLKM images in
+`newfiles/` are used instead. Neither `preload` nor `anco_hmos` exists in the
+supplied HMOS5 image set; no substitute image is invented for those HMOS7 names.
 
 Module inventory and init-mask helpers are included as `inspect_modules.py`,
 `check_module_crcs.py` and `list_init_masks.py`. They use the workspace containing
 this checkout and the extracted private inputs described above.
+
+To update the earlier validated seven-part candidate without repacking its
+unchanged vendor/auxiliary images, use `extend_with_dlkm.py --workspace WORKSPACE
+--base BASE_DIRECTORY --output NEW_EMPTY_DIRECTORY --dlkm-audit REPORT_JSON`,
+then run `verify_multipart.py` on the new output. The helper reuses unchanged
+images by hardlink and rebuilds only system plus the two new signed output copies.
+The original input images and their module bytes remain untouched.
