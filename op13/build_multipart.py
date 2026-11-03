@@ -121,10 +121,15 @@ def main():
     parser.add_argument('--host-security-patch', required=True)
     parser.add_argument('--vendor-additions', type=Path, required=True)
     parser.add_argument('--dlkm-audit', type=Path, required=True)
+    parser.add_argument('--startup-dir', type=Path, help='regenerated native startup tree')
     args = parser.parse_args()
     from prepare_dlkm import load_report, write_load_plan
     workspace, output = args.workspace.resolve(), args.output.resolve()
     dlkm = load_report(workspace, args.dlkm_audit)
+    startup_dir = args.startup_dir or workspace / 'out/op13-startup'
+    startup = json.loads((startup_dir / 'manifest.json').read_text())
+    if not startup['full_framework_preserved']:
+        raise RuntimeError('native startup lost required framework services')
     if not output.is_relative_to(workspace / 'out') or (output.exists() and any(output.iterdir())):
         parser.error('use a new empty workspace/out directory')
     if not re.fullmatch(r'\d{4}-\d\d-\d\d', args.host_security_patch):
@@ -158,8 +163,8 @@ def main():
         (stage / name).mkdir(parents=True, exist_ok=True)
     shutil.copy2(workspace / 'out/op13-bootstrap/init', stage / 'system/bin/init')
     shutil.copyfile(workspace / 'out/stock-dsu-audit/donor-init', stage / 'system/bin/hmos-native-init')
-    shutil.copytree(workspace / 'out/op13-startup', stage / 'hmos/startup', symlinks=True)
-    shutil.copyfile(workspace / 'out/op13-startup/mask-init-dirs', stage / 'hmos/mask-init-dirs')
+    shutil.copytree(startup_dir, stage / 'hmos/startup', symlinks=True)
+    shutil.copyfile(startup_dir / 'mask-init-dirs', stage / 'hmos/mask-init-dirs')
     shutil.copytree(workspace / 'out/op13-ui', stage / 'hmos/ui')
     for name in ('libdisplay_buffer_vdi_impl.z.so', 'libdisplay_composer_vdi_impl.z.so'):
         shutil.copyfile(workspace / 'out/op13-display' / name, stage / 'hmos/display' / name)
@@ -244,6 +249,7 @@ def main():
         'vendor_base': 'op13_stock/vendor.img', 'whole_donor_vendor_used': False,
         'odm_source': 'Reuse the existing mounted stock ODM EROFS read-only; no ODM partition in the ZIP',
         'dlkm_inputs': dlkm['images'], 'module_load_plan': dlkm['load_plan'],
+        'startup_configuration': startup,
         'partitions': records, 'zip': package,
         'component_validation': validation, 'vendor_additions': vendor,
         'android_compatibility_metadata': {'release': args.android_release, 'sdk': args.android_sdk,
@@ -253,7 +259,7 @@ def main():
         'vendor_directory_labels_adapted_for_native_policy': True,
         'known_unverified': ['Android first-stage mounting all eight DSU partitions and providing stock ODM',
             'BPF attachment, native policy and additional denials', 'module/firmware and display hardware behavior',
-            'missing donor libinput_driver.z.so; native input and touch need investigation',
+            'Actual OP13 touch events and input permissions/hotplug remain untested',
             'access-token semantics, fscrypt, code signing, full SceneBoard startup and peripherals']}
     (output / 'manifest.json').write_text(json.dumps(report, indent=2) + '\n')
     (output / 'SHA256SUMS').write_text(''.join(record['sha256'] + '  ' + record['file'] + '\n'

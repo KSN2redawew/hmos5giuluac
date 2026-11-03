@@ -138,7 +138,10 @@ def main():
                 blocks.append((name, text[start:token.end()]))
         previous = token
     selected = []
-    hosts = {'composer_host', 'allocator_host', 'input_user_host', 'pin_auth_host', 'user_auth_host', 'power_host'}
+    # The donor input proxy is passthrough and its implementation links the
+    # Linux /dev/input userspace backend. Its old input_user_host references
+    # libinput_driver.z.so, which is absent and unused by that path.
+    hosts = {'composer_host', 'allocator_host', 'pin_auth_host', 'user_auth_host', 'power_host'}
     for name, block in blocks:
         match = re.search(r'hostName\s*=\s*"([^"]+)"', block)
         if match and match.group(1) in hosts:
@@ -150,12 +153,14 @@ def main():
                 block = re.sub(r'\s*(thermal_device|thermal_daemon_device)\s*\{.*?\n\s{12}\}', '', block, flags=re.S)
             selected.append(block)
     if len(selected) != len(hosts):
-        raise ValueError('expected native display/input/auth and power/battery hosts')
+        raise ValueError('expected native display/auth and power/battery hosts')
     hcs = 'root {\n module = "default";\n device_info {\n match_attr = "hdf_manager";\n' + '\n'.join(selected) + '\n }\n}\n'
     (output / 'hdf-op13.hcs').write_text(hcs)
     subprocess.run([str(args.hc_gen.resolve()), '-b', '-o', str(output / 'hdf_default.hcb'),
                     str(output / 'hdf-op13.hcs')], check=True)
     report['hdf_hosts'] = sorted(hosts)
+    report['input_backend'] = 'Existing Linux libinput/MMI and HDI passthrough udriver; no input HDF host'
+    report['excluded_stale_hdf_hosts'] = ['input_user_host']
     report['hdf_source_sha256'] = hashlib.sha256(args.hdf_source.read_bytes()).hexdigest()
     report['full_framework_preserved'] = all(name in {s['service'] for s in report['preserved_services']}
         for name in ('foundation', 'appspawn', 'samgr', 'render_service', 'accesstoken_service', 'storage_daemon'))

@@ -97,7 +97,16 @@ def main():
         system_trees.append(target)
     before, after = system_trees
     modified = {str(path.relative_to(out / 'system-patch'))
-                for path in (out / 'system-patch').rglob('*') if path.is_file()}
+                for path in (out / 'system-patch').rglob('*') if path.is_file() or path.is_symlink()}
+    patched_files_checked = 0
+    for path in (out / 'system-patch').rglob('*'):
+        candidate = after / path.relative_to(out / 'system-patch')
+        if path.is_symlink():
+            assert candidate.is_symlink() and path.readlink() == candidate.readlink(), str(path)
+            patched_files_checked += 1
+        elif path.is_file():
+            assert candidate.is_file() and not candidate.is_symlink() and digest(path) == digest(candidate), str(path)
+            patched_files_checked += 1
     system_files_checked = 0
     for path in before.rglob('*'):
         name = str(path.relative_to(before))
@@ -181,6 +190,7 @@ def main():
         'native_vendor_addition_checks': len(report['vendor_additions']['files']),
         'op13_vendor_file_contents_or_symlinks_preserved': len(base),
         'unmodified_system_file_contents_or_symlinks_preserved': system_files_checked,
+        'patched_system_file_contents_or_symlinks_checked': patched_files_checked,
         'dlkm_input_images_unchanged': len(report['dlkm_inputs']),
         'zip_exactly_eight_partition_images': True, 'odm_image_omitted': True,
         'scope': 'Offline block retention, file metadata, hashes and archive membership; no device boot or ARB acceptance test'}

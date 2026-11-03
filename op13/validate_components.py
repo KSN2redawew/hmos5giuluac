@@ -61,6 +61,7 @@ def main():
         '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', qemu,
         '-L', SYSROOT, '-E', 'LD_LIBRARY_PATH=' + str(display) + ':' + str(SYSROOT / 'usr/lib'),
         display / 'display-mode-test']))
+    tests.append(run('arm64-input-backend-without-hdf', ['bash', 'op13/check_input_backend.sh']))
     for prefix in ('', 'developer-'):
         policy = WORKSPACE / 'out/op13-policy'
         tests.append(run(prefix + 'policy-delta', ['python3', 'op13/validate_policy_delta.py',

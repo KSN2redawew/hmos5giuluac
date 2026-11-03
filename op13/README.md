@@ -6,8 +6,8 @@ SuperLauncher. It is an experimental offline candidate: **no OP13 boot has
 been verified**. The kernel is unchanged.
 
 The local package is:
-`/home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-with-dlkm/hmos5-op13-dsu.zip`.
-The earlier single-image and seven-part candidates have been superseded.
+`/home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-passthrough/hmos5-op13-dsu.zip`.
+The earlier candidates, including `hmos5-op13-dsu-with-dlkm`, have been superseded.
 
 ## Partition layout
 
@@ -60,9 +60,16 @@ compatible.
 
 The selected vendor ELF dependency-name check has no unresolved DT_NEEDED
 names against the inspected system/vendor trees. This is not a symbol-version,
-linker-namespace or runtime execution test. The donor HDF config references
-`libinput_driver.z.so`, absent from the supplied images. Native input interface
-libraries are retained, but the missing HDF driver and touch remain unresolved.
+linker-namespace or runtime execution test. The donor input proxy uses
+`LoadHdiImpl` for passthrough, and its
+`libinput_interfaces_service_1.0.z.so` depends on the Linux userspace
+`libhdi_input_udriver.z.so`. The old input HDF-host entry referenced an absent
+`libinput_driver.z.so`; that stale host is omitted from the curated configuration.
+The real ARM64 userspace backend initializes in an isolated namespace without
+HDF/Binder devices and returns its expected errors for empty/invalid input
+queries. This does not exercise physical touch, event delivery or device SELinux
+permissions. The core MMI server also links the Linux libinput implementation.
+See [INPUT-PATH.md](INPUT-PATH.md) for the inspected interfaces and test scope.
 
 ## Boot and data handoff
 
@@ -99,7 +106,8 @@ or prove that the running kernel accepts each module.
 
 The startup overlay retains the main native framework with its original
 users/domains, excludes donor physical-storage mounting and flashing/update
-services, and limits the HDF host graph. The supplied donor already removed
+services, and limits the HDF host graph to display, allocator, authentication
+and power/battery. The supplied donor already removed
 its setup wizard; its setup-completion helper is retained. This does not prove
 setup flags or app startup work.
 
@@ -174,9 +182,17 @@ From `/home/palaziks/hmosnext5_op13/hmos5dodge`, using new empty output director
 ```sh
 bash op13/build_display.sh
 python3 op13/validate_components.py
+python3 op13/prepare_startup.py \
+  --audit /home/palaziks/hmosnext5_op13/out/stock-dsu-audit \
+  --output /home/palaziks/hmosnext5_op13/out/op13-startup-new \
+  --hdf-source /home/palaziks/hmosnext5_op13/work/hdf-default.d.hcs \
+  --hc-gen build/work/openharmony/hdf_core/framework/tools/hc-gen/build/hc-gen
+cp /home/palaziks/hmosnext5_op13/out/op13-startup/mask-init-dirs \
+  /home/palaziks/hmosnext5_op13/out/op13-startup-new/mask-init-dirs
 python3 op13/prepare_vendor.py \
   --workspace /home/palaziks/hmosnext5_op13 \
-  --output /home/palaziks/hmosnext5_op13/out/op13-vendor-additions-new
+  --output /home/palaziks/hmosnext5_op13/out/op13-vendor-additions-new \
+  --startup-dir /home/palaziks/hmosnext5_op13/out/op13-startup-new
 python3 op13/prepare_dlkm.py \
   --workspace /home/palaziks/hmosnext5_op13 \
   --source-dir /home/palaziks/hmosnext5_op13/newfiles \
@@ -186,15 +202,17 @@ python3 op13/build_multipart.py \
   --output /home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-multipart-new \
   --vendor-additions /home/palaziks/hmosnext5_op13/out/op13-vendor-additions-new \
   --dlkm-audit /home/palaziks/hmosnext5_op13/out/current-dlkm-audit-new/report.json \
+  --startup-dir /home/palaziks/hmosnext5_op13/out/op13-startup-new \
   --android-release 17 --android-sdk 37 --host-security-patch 2026-10-05
 python3 op13/verify_multipart.py \
   --workspace /home/palaziks/hmosnext5_op13 \
   --output /home/palaziks/hmosnext5_op13/out/hmos5-op13-dsu-multipart-new
 ```
 
-Fourteen component checks cover compilation, sanitizer-backed device-filter/
+Fifteen component checks cover compilation, sanitizer-backed device-filter/
 data-scan tests, rejected non-PID1 invocation, actual ARM64 storage mounts in an
-isolated namespace, display ABI/mode behavior, binary policy deltas, and the
+isolated namespace, display ABI/mode behavior, actual input-backend
+initialization without HDF, binary policy deltas, and the
 ARM64 formatter on a disposable regular test image. They do not test a phone
 boot, real userdata formatting, BPF attachment or display hardware.
 
@@ -221,3 +239,10 @@ unchanged vendor/auxiliary images, use `extend_with_dlkm.py --workspace WORKSPAC
 then run `verify_multipart.py` on the new output. The helper reuses unchanged
 images by hardlink and rebuilds only system plus the two new signed output copies.
 The original input images and their module bytes remain untouched.
+
+For a configuration-only update of an already validated eight-part candidate,
+`extend_with_dlkm.py` also accepts an eight-part base and `--startup-dir NEW_TREE`.
+It preserves the unchanged vendor/auxiliary/DLKM images and replaces only the
+system image. `check_input_backend.sh` tests the real donor ARM64 input backend
+in an isolated empty-device namespace. The missing legacy HDF-host entry is
+removed rather than replaced with a fake driver or a successful-IOCTL stub.

@@ -16,8 +16,9 @@ additions, matching OP13 DLKM images and the phone's existing stock ODM filesyst
 - The kernel is unchanged; initial rendering uses software Mesa.
 - Display hardware, touch, GPU acceleration, connectivity and full framework
   startup still need device testing.
-- A missing input-driver reference in the donor HDF configuration remains
-  unresolved.
+- The stale input HDF-host entry is removed; the existing Linux userspace
+  input backend has passed an isolated ARM64 initialization test. Phone touch
+  events and permissions remain unverified.
 
 ## Package layout
 

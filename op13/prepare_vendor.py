@@ -54,6 +54,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workspace', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--startup-dir', type=Path, help='native startup/HDF selection')
     args = parser.parse_args()
     workspace, output = args.workspace.resolve(), args.output.resolve()
     if not output.is_relative_to(workspace / 'out') or (output.exists() and any(output.iterdir())):
@@ -75,7 +76,8 @@ def main():
     excluded_hardware_libraries = {'libOpenCL.so', 'libhvgr_v200.so', 'vulkan.hvgr_v200.so'}
     reasons = defaultdict(set)
     binaries = set()
-    for config in (workspace / 'out/op13-startup').rglob('*.cfg'):
+    startup = args.startup_dir or workspace / 'out/op13-startup'
+    for config in startup.rglob('*.cfg'):
         for service in json.loads(config.read_text()).get('services', []):
             path = service.get('path', [''])[0]
             if path.startswith('/vendor/bin/'):
@@ -89,7 +91,7 @@ def main():
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         reasons[path].add('executable in selected native startup graph')
     # These HDF modules are dynamically loaded, rather than DT_NEEDED entries.
-    hcs = (workspace / 'out/op13-startup/hdf-op13.hcs').read_text()
+    hcs = (startup / 'hdf-op13.hcs').read_text()
     roots = set(re.findall(r'moduleName\s*=\s*"([^"]+)"', hcs))
     roots |= {'libdisplay_buffer_vdi_impl.z.so', 'libdisplay_composer_vdi_impl.z.so',
               'libEGL_impl.so', 'libGLESv2_impl.so', 'libhdi_input.z.so', 'libhdi_input_udriver.z.so'}
