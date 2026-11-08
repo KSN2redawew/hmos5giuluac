@@ -6,3 +6,4 @@
 /build/work/
 __pycache__/
 *.pyc
+giuliac/rebuild_system_fast.py

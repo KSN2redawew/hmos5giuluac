@@ -245,46 +245,44 @@ static dev_t find_dsu_data(void)
     return data;
 }
 
-static bool module_path_valid(const char *path)
-{
-    const char *prefixes[] = {"/vendor_dlkm/lib/modules/", "/system_dlkm/lib/modules/", "/hmos/modules/"};
-    bool prefix = false;
-    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); ++i)
-        if (!strncmp(path, prefixes[i], strlen(prefixes[i]))) prefix = true;
-    size_t length = strlen(path);
-    if (!prefix || length < 4 || strcmp(path + length - 3, ".ko") || strstr(path, "..") || strstr(path, "//")) return false;
-    for (const char *p = path; *p; ++p)
-        if (!( (*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
-               (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.' || *p == '/')) return false;
-    return true;
-}
-
 static void load_stock_modules(void)
 {
-    FILE *list = fopen("/hmos/modules/load-order", "re");
-    if (!list) {
-        log_line("no /hmos/modules/load-order found, skipping initial module loading");
-        return;
-    }
-    char line[640], name[128], source[384], extra;
-    while (fgets(line, sizeof(line), list)) {
-        line[strcspn(line, "\r\n")] = 0;
-        if (!line[0] || line[0] == '#') continue;
-        if (sscanf(line, "%127s %383s %c", name, source, &extra) != 2 || !module_path_valid(source)) {
-            continue;
+    const char *module_lists[] = {
+        "/vendor_dlkm/lib/modules/modules.load",
+        "/system_dlkm/lib/modules/modules.load",
+        "/hmos/modules/load-order"
+    };
+    for (size_t l = 0; l < sizeof(module_lists) / sizeof(module_lists[0]); ++l) {
+        FILE *list = fopen(module_lists[l], "re");
+        if (!list) continue;
+        log_line("loading kernel modules from %s...", module_lists[l]);
+        char line[640];
+        while (fgets(line, sizeof(line), list)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (!line[0] || line[0] == '#') continue;
+            char mod_name[128] = {0}, mod_path[384] = {0};
+            if (sscanf(line, "%127s %383s", mod_name, mod_path) == 2) {
+                // already has explicit path
+            } else if (sscanf(line, "%127s", mod_name) == 1) {
+                if (strstr(module_lists[l], "vendor_dlkm")) {
+                    snprintf(mod_path, sizeof(mod_path), "/vendor_dlkm/lib/modules/%s", mod_name);
+                } else {
+                    snprintf(mod_path, sizeof(mod_path), "/system_dlkm/lib/modules/%s", mod_name);
+                }
+            } else {
+                continue;
+            }
+            int fd = open(mod_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            if (fd >= 0) {
+                int result = syscall(__NR_finit_module, fd, "", 0);
+                close(fd);
+                if (result == 0) {
+                    log_line("loaded stock module %s", mod_name);
+                }
+            }
         }
-        char path[256];
-        snprintf(path, sizeof(path), "/sys/module/%s", name);
-        if (!access(path, F_OK)) continue;
-        int fd = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-        if (fd < 0) continue;
-        int result = syscall(__NR_finit_module, fd, "", 0); // no force flags
-        close(fd);
-        if (result == 0) {
-            log_line("loaded stock module %s", name);
-        }
+        fclose(list);
     }
-    fclose(list);
 }
 
 static void copy_device(const char *suffix, bool required)
@@ -303,6 +301,7 @@ static void copy_device(const char *suffix, bool required)
         snprintf(sysfile, sizeof(sysfile), "/sys/class/%s/%s/dev", class_name, name);
         unsigned major_number = 0, minor_number = 0;
         if (read_text(sysfile, numbers, sizeof(numbers)) || sscanf(numbers, "%u:%u", &major_number, &minor_number) != 2) {
+            log_line("device %s not found in sysfs (%s); skipping", suffix, sysfile);
             if (required) fatal(sysfile);
             return;
         }
@@ -362,13 +361,13 @@ static void device_namespace(void)
     const char *base[] = {"null", "zero", "full", "random", "urandom", "tty", "kmsg",
                          "ptmx", "ashmem", "fuse", "sw_sync", "kgsl-3d0"};
     for (size_t i = 0; i < sizeof(base) / sizeof(base[0]); ++i)
-        copy_device(base[i], !strcmp(base[i], "kgsl-3d0"));
+        copy_device(base[i], false);
     root_directory("/dev/dri", 0755);
     root_directory("/dev/dma_heap", 0755);
     root_directory("/dev/input", 0755);
-    copy_device("dri/card0", true);
+    copy_device("dri/card0", false);
     copy_device("dri/renderD128", false);
-    copy_device("dma_heap/system", true);
+    copy_device("dma_heap/system", false);
     copy_device("dma_heap/qcom,system", false);
     copy_device("dma_heap/qcom,display", false);
     DIR *inputs = opendir("/dev/input");
