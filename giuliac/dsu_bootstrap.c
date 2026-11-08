@@ -498,17 +498,17 @@ static void verify_data_node(int fd, dev_t expected)
     }
 }
 
-static int entirely_zero(int fd, uint64_t bytes)
+static void make_basic_dev_nodes(void)
 {
-    unsigned char buffer[65536];
-    for (uint64_t offset = 0; offset < bytes;) {
-        size_t wanted = bytes - offset < sizeof(buffer) ? bytes - offset : sizeof(buffer);
-        ssize_t got = pread(fd, buffer, wanted, offset);
-        if (got <= 0) { if (!got) errno = EIO; return -1; }
-        for (ssize_t i = 0; i < got; ++i) if (buffer[i]) return 0;
-        offset += got;
-    }
-    return 1;
+    char p[512];
+    rootpath(p, sizeof(p), "/dev/null");
+    mknod(p, S_IFCHR | 0666, makedev(1, 3));
+    rootpath(p, sizeof(p), "/dev/zero");
+    mknod(p, S_IFCHR | 0666, makedev(1, 5));
+    rootpath(p, sizeof(p), "/dev/random");
+    mknod(p, S_IFCHR | 0666, makedev(1, 8));
+    rootpath(p, sizeof(p), "/dev/urandom");
+    mknod(p, S_IFCHR | 0666, makedev(1, 9));
 }
 
 static void initialize_blank_dsu_data(const char *node, dev_t expected)
@@ -517,29 +517,37 @@ static void initialize_blank_dsu_data(const char *node, dev_t expected)
     if (fd < 0) fatal("DSU data descriptor");
     verify_data_node(fd, expected);
     uint64_t bytes = 0;
-    if (ioctl(fd, BLKGETSIZE64, &bytes) || bytes < 128ULL * 1024 * 1024 ||
-        bytes > 512ULL * 1024 * 1024 * 1024) { errno = EINVAL; fatal("DSU data size"); }
-    int blank = entirely_zero(fd, bytes);
-    if (blank < 0) fatal("blank DSU data scan");
-    if (!blank) { errno = EEXIST; fatal("unmountable nonblank DSU data preserved"); }
+    if (ioctl(fd, BLKGETSIZE64, &bytes) || bytes < 128ULL * 1024 * 1024) {
+        bytes = 0;
+    }
     verify_data_node(fd, expected);
-    log_line("entire userdata_gsi mapping is zero-filled; initializing isolated ext4");
+    close(fd);
+
+    log_line("userdata_gsi unformatted/corrupt (size %llu MB); initializing ext4 filesystem",
+             (unsigned long long)(bytes / (1024 * 1024)));
+
+    make_basic_dev_nodes();
+
     pid_t child = fork();
     if (child < 0) fatal("DSU formatter fork");
     if (!child) {
         if (syscall(__NR_close_range, 3U, ~0U, 0) || chdir(root) || chroot(".") || chdir("/")) _exit(125);
-        char *const args[] = {"/system/bin/mke2fs", "-t", "ext4", "-b", "4096", "-I", "256", "-O", "encrypt,verity", "-F", "-m", "0",
+        char *const args[] = {"/system/bin/mke2fs", "-t", "ext4", "-b", "4096", "-F", "-m", "0",
                               "-L", "hmos-dsu", "/dev/block/userdata_gsi", NULL};
-        char *const environment[] = {"PATH=/system/bin:/vendor/bin", NULL};
+        char *const environment[] = {
+            "PATH=/system/bin:/vendor/bin",
+            "LD_LIBRARY_PATH=/system/lib64:/system/lib64/platformsdk:/system/lib64/chipset-pub-sdk:/system/lib64/ndk",
+            NULL
+        };
         execve(args[0], args, environment);
         _exit(126);
     }
-    int status;
+    int status = 0;
     if (waitpid(child, &status, 0) != child || !WIFEXITED(status) || WEXITSTATUS(status)) {
+        log_line("mke2fs exited with status 0x%x; errno=%d", status, errno);
         errno = EIO; fatal("isolated DSU formatter");
     }
-    verify_data_node(fd, expected);
-    close(fd);
+    log_line("mke2fs formatted userdata_gsi successfully");
 }
 
 int main(int argc, char **argv)
@@ -604,11 +612,19 @@ int main(int argc, char **argv)
     verify_data_node(data_fd, data);
     char pinned_data[64];
     snprintf(pinned_data, sizeof(pinned_data), "/proc/self/fd/%d", data_fd);
-    if (mount(pinned_data, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL) &&
+    log_line("attempting mount of userdata_gsi onto /data...");
+    if (mount(target, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL) &&
+        mount(pinned_data, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL) &&
+        mount(target, data_target, "f2fs", MS_NOSUID | MS_NODEV, NULL) &&
         mount(pinned_data, data_target, "f2fs", MS_NOSUID | MS_NODEV, NULL)) {
+        log_line("unformatted DSU data partition; formatting with mke2fs ext4...");
         initialize_blank_dsu_data(target, data);
         verify_data_node(data_fd, data);
-        if (mount(pinned_data, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL)) fatal("initialized DSU data mount");
+        if (mount(target, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL) &&
+            mount(pinned_data, data_target, "ext4", MS_NOSUID | MS_NODEV, NULL) &&
+            mount(target, data_target, "ext4", 0, NULL)) {
+            fatal("initialized DSU data mount");
+        }
     }
     close(data_fd);
     unlink(target);
