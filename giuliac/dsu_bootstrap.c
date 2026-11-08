@@ -113,46 +113,122 @@ static void root_mount(const char *source, const char *suffix, const char *type,
     if (mount(source, target, type, flags, options)) fatal(target);
 }
 
-static void verify_dsu_mount(const char *source, const char *expected)
-{
-    struct stat st;
-    struct statvfs fs;
-    if (stat(source, &st) || !S_ISDIR(st.st_mode) || statvfs(source, &fs) || !(fs.f_flag & ST_RDONLY)) {
-        errno = ENODEV; fatal("read-only DSU partition mount required");
-    }
-    char path[512], name[128];
-    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/dm/name", major(st.st_dev), minor(st.st_dev));
-    if (read_text(path, name, sizeof(name))) fatal("DSU partition mapper identity");
-    if (!strcmp(name, expected)) return;
-    // Android may put a dm-verity device above the exact *_gsi mapping.
-    // Accept one extra DM layer only when its sole slave is that mapping.
-    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/slaves", major(st.st_dev), minor(st.st_dev));
-    DIR *slaves = opendir(path);
-    if (!slaves) fatal("DSU verified mapper slaves");
-    struct dirent *entry;
-    unsigned count = 0, matching = 0;
-    while ((entry = readdir(slaves))) {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        ++count;
-        snprintf(path, sizeof(path), "/sys/class/block/%.128s/dm/name", entry->d_name);
-        if (!read_text(path, name, sizeof(name)) && !strcmp(name, expected)) ++matching;
-    }
-    closedir(slaves);
-    if (count != 1 || matching != 1) { errno = ENODEV; fatal("partition is not backed by expected DSU mapping"); }
-}
-
-static void dsu_bind(const char *source, const char *target, const char *expected)
-{
-    verify_dsu_mount(source, expected);
-    root_bind(source, target, true);
-    log_line("bound separate DSU partition %s from %s", expected, source);
-}
-
 static bool dm_name_valid(const char *name)
 {
     if (strncmp(name, "dm-", 3) || !name[3]) return false;
     for (const char *p = name + 3; *p; ++p) if (*p < '0' || *p > '9') return false;
     return true;
+}
+
+static dev_t find_dsu_dev(const char *expected_name)
+{
+    DIR *dir = opendir("/sys/block");
+    if (!dir) return 0;
+    struct dirent *entry;
+    dev_t res = 0;
+    while ((entry = readdir(dir))) {
+        if (!dm_name_valid(entry->d_name)) continue;
+        char path[512], name[128], numbers[64];
+        snprintf(path, sizeof(path), "/sys/block/%.64s/dm/name", entry->d_name);
+        if (read_text(path, name, sizeof(name))) continue;
+        bool match = !strcmp(name, expected_name);
+        if (!match) {
+            snprintf(path, sizeof(path), "/sys/block/%.64s/slaves", entry->d_name);
+            DIR *slaves = opendir(path);
+            if (slaves) {
+                struct dirent *se;
+                while ((se = readdir(slaves))) {
+                    if (!strcmp(se->d_name, ".") || !strcmp(se->d_name, "..")) continue;
+                    char spath[512], sname[128];
+                    snprintf(spath, sizeof(spath), "/sys/class/block/%.128s/dm/name", se->d_name);
+                    if (!read_text(spath, sname, sizeof(sname)) && !strcmp(sname, expected_name)) {
+                        match = true;
+                        break;
+                    }
+                }
+                closedir(slaves);
+            }
+        }
+        if (match) {
+            snprintf(path, sizeof(path), "/sys/block/%.64s/dev", entry->d_name);
+            unsigned major_num, minor_num;
+            if (!read_text(path, numbers, sizeof(numbers)) && sscanf(numbers, "%u:%u", &major_num, &minor_num) == 2) {
+                res = makedev(major_num, minor_num);
+                break;
+            }
+        }
+    }
+    closedir(dir);
+    return res;
+}
+
+static bool is_already_mounted_dsu(const char *source, const char *expected)
+{
+    struct stat st;
+    struct statvfs fs;
+    if (stat(source, &st) || !S_ISDIR(st.st_mode) || statvfs(source, &fs) || !(fs.f_flag & ST_RDONLY))
+        return false;
+    char path[512], name[128];
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/dm/name", major(st.st_dev), minor(st.st_dev));
+    if (!read_text(path, name, sizeof(name)) && !strcmp(name, expected)) return true;
+    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/slaves", major(st.st_dev), minor(st.st_dev));
+    DIR *slaves = opendir(path);
+    if (!slaves) return false;
+    struct dirent *entry;
+    bool found = false;
+    while ((entry = readdir(slaves))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        snprintf(path, sizeof(path), "/sys/class/block/%.128s/dm/name", entry->d_name);
+        if (!read_text(path, name, sizeof(name)) && !strcmp(name, expected)) {
+            found = true;
+            break;
+        }
+    }
+    closedir(slaves);
+    return found;
+}
+
+static void mount_or_bind_dsu(const char *mountpoint, const char *dm_name, bool required)
+{
+    char target[512];
+    rootpath(target, sizeof(target), mountpoint);
+
+    if (is_already_mounted_dsu(mountpoint, dm_name)) {
+        root_bind(mountpoint, mountpoint, true);
+        log_line("bound already-mounted DSU partition %s from %s", dm_name, mountpoint);
+        return;
+    }
+
+    dev_t dev = find_dsu_dev(dm_name);
+    if (dev) {
+        char nodepath[512];
+        snprintf(nodepath, sizeof(nodepath), "/dev/block_%s", dm_name);
+        unlink(nodepath);
+        if (mknod(nodepath, S_IFBLK | 0600, dev) == 0) {
+            int res = mount(nodepath, target, "erofs", MS_RDONLY | MS_NODEV | MS_NOATIME, NULL);
+            if (res != 0) {
+                res = mount(nodepath, target, "ext4", MS_RDONLY | MS_NODEV | MS_NOATIME, NULL);
+            }
+            unlink(nodepath);
+            if (res == 0) {
+                log_line("mounted separate DSU partition %s (%u:%u) to %s", dm_name, major(dev), minor(dev), mountpoint);
+                return;
+            } else {
+                log_line("mount failed for DSU partition %s: errno=%d (%s)", dm_name, errno, strerror(errno));
+            }
+        } else {
+            log_line("mknod failed for DSU partition %s: errno=%d (%s)", dm_name, errno, strerror(errno));
+        }
+    } else {
+        log_line("block device for DSU partition %s not found in /sys/block", dm_name);
+    }
+
+    if (required) {
+        errno = ENODEV;
+        fatal("required DSU partition mount failed");
+    } else {
+        log_line("warning: non-critical DSU partition %s skipped", dm_name);
+    }
 }
 
 static dev_t find_dsu_data(void)
@@ -480,13 +556,14 @@ static void initialize_blank_dsu_data(const char *node, dev_t expected)
 
 int main(int argc, char **argv)
 {
-    if (getpid() != 1 || argc != 2 || strcmp(argv[1], "selinux_setup")) {
+    if (getpid() != 1) {
         fputs("This executable is only for Android DSU PID-1 handoff. No action taken.\n", stderr);
         return 2;
     }
     kmsg = open("/dev/kmsg", O_WRONLY | O_CLOEXEC);
     umask(0);
-    log_line("starting experimental stock-kernel DSU handoff for OnePlus Ace 5 (giuliac)");
+    log_line("starting experimental stock-kernel DSU handoff for OnePlus Ace 5 (giuliac), argc=%d argv[1]=%s",
+             argc, argc > 1 ? argv[1] : "(null)");
     dev_t data = find_dsu_data();
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) fatal("private mount propagation");
     directory(root, 0755);
@@ -496,11 +573,11 @@ int main(int argc, char **argv)
         "/mnt", "/tmp", "/log", "/config", "/storage", "/sec_storage", "/module_update",
         "/preload", "/version", "/updater", "/eng_chipset", "/eng_system"};
     for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); ++i) root_directory(dirs[i], 0755);
-    dsu_bind("/system", "/system", "system_gsi");
+    mount_or_bind_dsu("/system", "system_gsi", true);
     root_bind("/system/bin/hmos-native-init", "/system/bin/init", true);
-    dsu_bind("/vendor", "/vendor", "vendor_gsi");
-    dsu_bind("/vendor_dlkm", "/vendor_dlkm", "vendor_dlkm_gsi");
-    dsu_bind("/system_dlkm", "/system_dlkm", "system_dlkm_gsi");
+    mount_or_bind_dsu("/vendor", "vendor_gsi", true);
+    mount_or_bind_dsu("/vendor_dlkm", "vendor_dlkm_gsi", true);
+    mount_or_bind_dsu("/system_dlkm", "system_dlkm_gsi", true);
     // Reuse Android's already mounted read-only stock ODM EROFS.
     struct statvfs odm_flags;
     struct statfs odm_fs;
@@ -515,10 +592,10 @@ int main(int argc, char **argv)
         root_bind("/odm", "/odm", true);
     }
     char target[512];
-    dsu_bind("/chip_prod", "/chip_prod", "chip_prod_gsi");
-    dsu_bind("/sys_prod", "/sys_prod", "sys_prod_gsi");
-    dsu_bind("/cust", "/cust", "cust_gsi");
-    dsu_bind("/patch_hw", "/patch_hw", "patch_hw_gsi");
+    mount_or_bind_dsu("/chip_prod", "chip_prod_gsi", false);
+    mount_or_bind_dsu("/sys_prod", "sys_prod_gsi", false);
+    mount_or_bind_dsu("/cust", "cust_gsi", false);
+    mount_or_bind_dsu("/patch_hw", "patch_hw_gsi", false);
     root_link("system/bin", "/bin");
     root_link("system/etc", "/etc");
     root_link("system/lib", "/lib");

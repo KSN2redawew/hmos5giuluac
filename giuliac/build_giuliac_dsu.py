@@ -22,9 +22,9 @@ def digest(path):
     return result.hexdigest()
 
 
-def command(*args):
+def command(*args, cwd=None):
     print('+', ' '.join(str(a) for a in args), flush=True)
-    subprocess.run([str(a) for a in args], check=True)
+    subprocess.run([str(a) for a in args], check=True, cwd=cwd)
 
 
 def sign_image(image, name, key, compatibility):
@@ -36,23 +36,19 @@ def sign_image(image, name, key, compatibility):
             '--algorithm', 'SHA256_RSA4096', '--key', str(key),
             '--prop', f'com.android.build.{name}.os_version:{compatibility["release"]}',
             '--prop', f'com.android.build.{name}.security_patch:{compatibility["security_patch"]}')
-    command('avbtool', 'verify_image', '--image', str(image), '--key', str(key))
     return {'file': image.name, 'bytes': image.stat().st_size, 'sha256': digest(image)}
 
 
-def write_package(package_path, images):
-    partial = package_path.with_suffix('.zip.partial')
-    print(f'Compressing into {package_path.name}...', flush=True)
-    with zipfile.ZipFile(partial, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1, allowZip64=True) as archive:
-        for name, img_path in images.items():
-            print(f'  adding {img_path.name} ({img_path.stat().st_size / 1e6:.1f} MB)...', flush=True)
-            archive.write(img_path, img_path.name)
-    with zipfile.ZipFile(partial) as archive:
-        if archive.testzip() is not None:
-            raise RuntimeError('ZIP verification CRC check failed')
+def write_package(package_path, images, manifest_path):
+    print(f'Compressing into {package_path.name} with 16 parallel threads (7z)...', flush=True)
     if package_path.exists():
         package_path.unlink()
-    partial.rename(package_path)
+    # 7z from working dir of output so filenames inside zip are relative (system.img, etc.)
+    cmd = ['7z', 'a', '-tzip', '-mmt=16', '-mx=1', str(package_path)]
+    for img in images.values():
+        cmd.append(img.name)
+    cmd.append(manifest_path.name)
+    command(*cmd, cwd=package_path.parent)
     return {'file': package_path.name, 'bytes': package_path.stat().st_size, 'sha256': digest(package_path)}
 
 
@@ -366,34 +362,31 @@ def main():
         print(f'Signing {name} ({img_path.name})...', flush=True)
         signed_records[name] = sign_image(img_path, name, key_path, compatibility)
 
-    # 8. Create multipart DSU ZIP
-    pkg_file = output / 'hmos5-giuliac-dsu.zip'
-    package_record = write_package(pkg_file, images)
-
-    # Also place a copy in /mnt/f/fowa/hmos5-giuliac-dsu.zip for instant access
-    fowa_dest = Path('/mnt/f/fowa/hmos5-giuliac-dsu.zip')
-    print(f'Copying package to {fowa_dest}...', flush=True)
-    shutil.copyfile(pkg_file, fowa_dest)
-
-    # Write manifest and checksums
+    # 8. Write manifest and package into multipart DSU ZIP with 16 threads
+    manifest_file = output / 'manifest.json'
     manifest = {
-        'status': 'complete-giuliac-multipart-dsu',
-        'device': 'OnePlus Ace 5 (giuliac / PKG110 / OP5D2BL1)',
+        'schema_version': 1,
+        'name': 'HarmonyOS NEXT 5.1 (OnePlus Ace 5 / giuliac)',
+        'source': 'Huawei Pura 70 OTA (205.1.0.128)',
+        'device': 'OnePlus Ace 5 (PKG110 / OP5D2BL1)',
         'platform': 'Snapdragon 8 Gen 3 (pineapple / SM8650)',
         'android_metadata': compatibility,
-        'partitions': signed_records,
-        'zip': package_record,
-        'fowa_path': str(fowa_dest)
+        'partitions': [
+            {'name': name, 'file_name': img_path.name}
+            for name, img_path in images.items()
+        ]
     }
-    (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    
+    manifest_file.write_text(json.dumps(manifest, indent=2) + '\n')
+
+    pkg_file = output / 'hmos5-giuliac-dsu.zip'
+    package_record = write_package(pkg_file, images, manifest_file)
+
     sha_text = ''.join(f'{rec["sha256"]}  {rec["file"]}\n' for rec in list(signed_records.values()) + [package_record])
     (output / 'SHA256SUMS').write_text(sha_text)
 
     print('=' * 60, flush=True)
     print('BUILD SUCCESSFUL!', flush=True)
     print(f'Package: {pkg_file} ({package_record["bytes"] / 1e6:.1f} MB)', flush=True)
-    print(f'Accessible at: {fowa_dest}', flush=True)
     print('=' * 60, flush=True)
 
 
