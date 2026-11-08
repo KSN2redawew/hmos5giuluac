@@ -47,11 +47,18 @@ static void log_line(const char *format, ...)
     dprintf(2, "hmos-giuliac: %s\n", message);
     if (kmsg >= 0) dprintf(kmsg, "<3>hmos-giuliac: %s\n", message);
     if (bootlog >= 0) dprintf(bootlog, "%s\n", message);
+    int meta_fd = open("/metadata/hmos-bootstrap.log", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+    if (meta_fd >= 0) {
+        dprintf(meta_fd, "%s\n", message);
+        fdatasync(meta_fd);
+        close(meta_fd);
+    }
 }
 
 static __attribute__((noreturn)) void fatal(const char *operation)
 {
     log_line("STOP %s: errno=%d (%s); no automatic reboot", operation, errno, strerror(errno));
+    sync();
     if (getpid() != 1) exit(1);
     for (;;) pause();
 }
@@ -162,41 +169,22 @@ static dev_t find_dsu_dev(const char *expected_name)
     return res;
 }
 
-static bool is_already_mounted_dsu(const char *source, const char *expected)
-{
-    struct stat st;
-    struct statvfs fs;
-    if (stat(source, &st) || !S_ISDIR(st.st_mode) || statvfs(source, &fs) || !(fs.f_flag & ST_RDONLY))
-        return false;
-    char path[512], name[128];
-    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/dm/name", major(st.st_dev), minor(st.st_dev));
-    if (!read_text(path, name, sizeof(name)) && !strcmp(name, expected)) return true;
-    snprintf(path, sizeof(path), "/sys/dev/block/%u:%u/slaves", major(st.st_dev), minor(st.st_dev));
-    DIR *slaves = opendir(path);
-    if (!slaves) return false;
-    struct dirent *entry;
-    bool found = false;
-    while ((entry = readdir(slaves))) {
-        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
-        snprintf(path, sizeof(path), "/sys/class/block/%.128s/dm/name", entry->d_name);
-        if (!read_text(path, name, sizeof(name)) && !strcmp(name, expected)) {
-            found = true;
-            break;
-        }
-    }
-    closedir(slaves);
-    return found;
-}
+
 
 static void mount_or_bind_dsu(const char *mountpoint, const char *dm_name, bool required)
 {
     char target[512];
     rootpath(target, sizeof(target), mountpoint);
 
-    if (is_already_mounted_dsu(mountpoint, dm_name)) {
-        root_bind(mountpoint, mountpoint, true);
-        log_line("bound already-mounted DSU partition %s from %s", dm_name, mountpoint);
-        return;
+    struct stat st;
+    if (!stat(mountpoint, &st) && S_ISDIR(st.st_mode)) {
+        struct statfs sfs;
+        if (!statfs(mountpoint, &sfs) && (unsigned long)sfs.f_type != 0x01021994UL /* TMPFS */ &&
+            (unsigned long)sfs.f_type != 0x858458f6UL /* RAMFS */) {
+            root_bind(mountpoint, mountpoint, true);
+            log_line("bound existing %s mount into new root (%s)", mountpoint, dm_name);
+            return;
+        }
     }
 
     dev_t dev = find_dsu_dev(dm_name);
@@ -206,9 +194,7 @@ static void mount_or_bind_dsu(const char *mountpoint, const char *dm_name, bool 
         unlink(nodepath);
         if (mknod(nodepath, S_IFBLK | 0600, dev) == 0) {
             int res = mount(nodepath, target, "erofs", MS_RDONLY | MS_NODEV | MS_NOATIME, NULL);
-            if (res != 0) {
-                res = mount(nodepath, target, "ext4", MS_RDONLY | MS_NODEV | MS_NOATIME, NULL);
-            }
+            if (res != 0) res = mount(nodepath, target, "ext4", MS_RDONLY | MS_NODEV | MS_NOATIME, NULL);
             unlink(nodepath);
             if (res == 0) {
                 log_line("mounted separate DSU partition %s (%u:%u) to %s", dm_name, major(dev), minor(dev), mountpoint);
@@ -233,27 +219,29 @@ static void mount_or_bind_dsu(const char *mountpoint, const char *dm_name, bool 
 
 static dev_t find_dsu_data(void)
 {
-    DIR *dir = opendir("/sys/block");
-    if (!dir) fatal("sys/block");
-    struct dirent *entry;
-    bool system_found = false;
-    dev_t data = 0;
-    while ((entry = readdir(dir))) {
-        if (!dm_name_valid(entry->d_name)) continue;
-        char path[512], name[128], numbers[64];
-        snprintf(path, sizeof(path), "/sys/block/%.64s/dm/name", entry->d_name);
-        if (read_text(path, name, sizeof(name))) continue;
-        if (!strcmp(name, "system_gsi")) system_found = true;
-        if (strcmp(name, "userdata_gsi")) continue;
-        snprintf(path, sizeof(path), "/sys/block/%.64s/dev", entry->d_name);
-        unsigned major_number, minor_number;
-        if (read_text(path, numbers, sizeof(numbers)) || sscanf(numbers, "%u:%u", &major_number, &minor_number) != 2)
-            fatal("userdata_gsi device identity");
-        if (data) { errno = EEXIST; fatal("multiple userdata_gsi mappings"); }
-        data = makedev(major_number, minor_number);
+    dev_t data = find_dsu_dev("userdata_gsi");
+    if (!data) {
+        DIR *dir = opendir("/sys/block");
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir))) {
+                if (!dm_name_valid(entry->d_name)) continue;
+                char path[512], name[128];
+                snprintf(path, sizeof(path), "/sys/block/%.64s/dm/name", entry->d_name);
+                if (read_text(path, name, sizeof(name))) continue;
+                if (strstr(name, "userdata")) {
+                    data = find_dsu_dev(name);
+                    if (data) break;
+                }
+            }
+            closedir(dir);
+        }
     }
-    closedir(dir);
-    if (!system_found || !data) { errno = ENODEV; fatal("exact system_gsi/userdata_gsi required"); }
+    if (!data) {
+        log_line("STOP: userdata_gsi block device not found in /sys/block");
+        errno = ENODEV; fatal("find userdata_gsi");
+    }
+    log_line("located userdata_gsi device (%u:%u)", major(data), minor(data));
     return data;
 }
 
