@@ -245,6 +245,19 @@ static dev_t find_dsu_data(void)
     return data;
 }
 
+static bool is_module_blacklisted(const char *name)
+{
+    const char *blacklist[] = {
+        "wdt", "watchdog", "theia", "phoenix", "dfr",
+        "panic", "hung_task", "force_shutdown", "freeze",
+        "sigkill_diagnosis", "last_boot_reason", "ordump"
+    };
+    for (size_t i = 0; i < sizeof(blacklist) / sizeof(blacklist[0]); ++i) {
+        if (strstr(name, blacklist[i])) return true;
+    }
+    return false;
+}
+
 static void load_stock_modules(void)
 {
     const char *module_lists[] = {
@@ -270,6 +283,10 @@ static void load_stock_modules(void)
                     snprintf(mod_path, sizeof(mod_path), "/system_dlkm/lib/modules/%s", mod_name);
                 }
             } else {
+                continue;
+            }
+            if (is_module_blacklisted(mod_name)) {
+                log_line("skipping blacklisted watchdog/dfr module %s", mod_name);
                 continue;
             }
             int fd = open(mod_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -396,72 +413,9 @@ static void device_namespace(void)
     root_mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,mode=0620,ptmxmode=0666");
 }
 
-#define INS(code_, dst_, src_, off_, imm_) ((struct bpf_insn){.code=(code_),.dst_reg=(dst_),.src_reg=(src_),.off=(off_),.imm=(imm_)})
-static size_t build_device_filter(struct bpf_insn program[1024])
-{
-    size_t n = 0;
-    program[n++] = INS(BPF_LDX | BPF_W | BPF_MEM, 2, 1, 0, 0);
-    program[n++] = INS(BPF_ALU | BPF_AND | BPF_K, 2, 0, 0, 0xffff);
-    program[n++] = INS(BPF_JMP | BPF_JEQ | BPF_K, 2, 0, 2, 2); // char only
-    program[n++] = INS(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0);
-    program[n++] = INS(BPF_JMP | BPF_EXIT, 0, 0, 0, 0);
-    program[n++] = INS(BPF_LDX | BPF_W | BPF_MEM, 2, 1, 4, 0); // major
-    program[n++] = INS(BPF_LDX | BPF_W | BPF_MEM, 3, 1, 8, 0); // minor
-    for (size_t i = 0; i < device_count; ++i) {
-        program[n++] = INS(BPF_JMP | BPF_JNE | BPF_K, 2, 0, 3, devices[i].major);
-        program[n++] = INS(BPF_JMP | BPF_JNE | BPF_K, 3, 0, 2, devices[i].minor);
-        program[n++] = INS(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 1);
-        program[n++] = INS(BPF_JMP | BPF_EXIT, 0, 0, 0, 0);
-    }
-    for (unsigned major_number = 136; major_number <= 143; ++major_number) {
-        program[n++] = INS(BPF_JMP | BPF_JNE | BPF_K, 2, 0, 2, major_number);
-        program[n++] = INS(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 1);
-        program[n++] = INS(BPF_JMP | BPF_EXIT, 0, 0, 0, 0);
-    }
-    program[n++] = INS(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0);
-    program[n++] = INS(BPF_JMP | BPF_EXIT, 0, 0, 0, 0);
-    return n;
-}
-
 static void isolate_devices(void)
 {
-    directory("/mnt/hmos-cgroup", 0700);
-    if (mount("cgroup2", "/mnt/hmos-cgroup", "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL)) {
-        log_line("cgroup2 mount skipped or already mounted");
-        return;
-    }
-    directory("/mnt/hmos-cgroup/hmos", 0700);
-    directory("/mnt/hmos-cgroup/hmos/payload", 0700);
-    int group = open("/mnt/hmos-cgroup/hmos", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (group < 0) return;
-    struct bpf_insn program[1024];
-    size_t n = build_device_filter(program);
-    char verifier[16384] = {0};
-    union bpf_attr load = {0};
-    load.prog_type = BPF_PROG_TYPE_CGROUP_DEVICE;
-    load.insn_cnt = n;
-    load.insns = (uint64_t)(uintptr_t)program;
-    load.license = (uint64_t)(uintptr_t)"Apache";
-    load.log_buf = (uint64_t)(uintptr_t)verifier;
-    load.log_size = sizeof(verifier);
-    load.log_level = 1;
-    int fd = syscall(__NR_bpf, BPF_PROG_LOAD, &load, sizeof(load));
-    if (fd >= 0) {
-        union bpf_attr attach = {0};
-        attach.target_fd = group;
-        attach.attach_bpf_fd = fd;
-        attach.attach_type = BPF_CGROUP_DEVICE;
-        syscall(__NR_bpf, BPF_PROG_ATTACH, &attach, sizeof(attach));
-        close(fd);
-    }
-    close(group);
-    int membership = open("/mnt/hmos-cgroup/hmos/payload/cgroup.procs", O_WRONLY | O_CLOEXEC);
-    if (membership >= 0) {
-        write(membership, "1\n", 2);
-        close(membership);
-    }
-    unshare(CLONE_NEWCGROUP);
-    log_line("device filter attached: %zu character nodes allowed", device_count);
+    log_line("device filter bypassed: full device access preserved for donor init");
 }
 
 static void root_link(const char *target, const char *suffix)
@@ -653,19 +607,21 @@ int main(int argc, char **argv)
     if (!access("/hmos/ui/display_manager_config.xml", F_OK)) root_bind("/hmos/ui/display_manager_config.xml", "/sys_prod/etc/window/resources/display_manager_config.xml", true);
     if (!access("/hmos/ui/hgm_policy_config.xml", F_OK)) root_bind("/hmos/ui/hgm_policy_config.xml", "/sys_prod/etc/graphic/hgm_policy_config.xml", true);
     isolate_devices();
-    prctl(PR_CAPBSET_DROP, CAP_SYS_BOOT, 0, 0, 0);
-    prctl(PR_CAPBSET_DROP, CAP_SYS_RAWIO, 0, 0, 0);
-    prctl(PR_CAPBSET_DROP, CAP_SYS_MODULE, 0, 0, 0);
     root_directory("/sys/fs/selinux", 0755);
     root_directory("/dev/cgroup", 0755);
     root_mount("cgroup2", "/dev/cgroup", "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
     log_line("executing full donor init --second-stage; target: SceneBoard/Ace 5");
     if (chdir(root) || chroot(".") || chdir("/")) fatal("chroot");
     syscall(__NR_close_range, 3U, ~0U, 0);
-    kmsg = bootlog = -1;
-    int null = open("/dev/null", O_RDWR);
+    // Keep kmsg open for PID 1 stdout/stderr so init logs are visible
+    int kfd = open("/dev/kmsg", O_WRONLY);
+    if (kfd >= 0) {
+        dup2(kfd, 1);
+        dup2(kfd, 2);
+    }
+    int null = open("/dev/null", O_RDONLY);
     if (null >= 0) {
-        for (int fd = 0; fd < 3; ++fd) dup2(null, fd);
+        dup2(null, 0);
         if (null > 2) close(null);
     }
     char *const init_args[] = {"/system/bin/init", "--second-stage", "0", NULL};
