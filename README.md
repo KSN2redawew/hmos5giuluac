@@ -1,11 +1,18 @@
-# hmos5dodge
+# HarmonyOS NEXT 5 Ports (OnePlus Ace 5 & OnePlus 13)
 
-Experimental **HarmonyOS NEXT 5 port for OnePlus 13**, using the stock OP13
-kernel and separate partitions installed through Android DSU.
+Experimental **HarmonyOS NEXT 5.1 DSU ports for OnePlus Ace 5 (`giuliac` / `PKG110`) and OnePlus 13 (`palas` / `dodge`)**, using stock vendor bases, matching DLKM images, and separate partition images installed through Android Dynamic System Updates (DSU).
 
-The port targets the native HarmonyOS framework, SceneBoard and SuperLauncher.
-It uses an OP13 stock vendor base with selected native HarmonyOS runtime
-additions, matching OP13 DLKM images and the phone's existing stock ODM filesystem.
+The port targets the native HarmonyOS NEXT framework, SceneBoard, SuperLauncher, and OpenHarmony 5.0.3+ ABI with software Mesa rendering and guarded first-stage PID-1 handoff.
+
+## Supported Devices
+
+- **OnePlus Ace 5 (`giuliac` / `PKG110` / `OP5D2BL1`)**: See **[giuliac/README.md](giuliac/README.md)**.
+  - SoC: Snapdragon 8 Gen 3 (`pineapple` / SM8650)
+  - Display: 1264x2780, 560 DPI, 120Hz
+  - Package: `hmos5-giuliac-dsu.zip`
+- **OnePlus 13 (`palas` / `dodge`)**: See **[op13/README.md](op13/README.md)**.
+  - SoC: Snapdragon 8 Elite (`sun` / SM8750)
+  - Package: `hmos5-op13-dsu.zip`
 
 ## Status
 

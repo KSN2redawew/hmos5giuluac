@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0
+     High Refresh Rate Policy config for OnePlus Ace 5 (giuliac).
+     Discrete refresh rates: 60Hz, 90Hz, 120Hz.
+-->
+<HgmConfig>
+  <RefreshRateStrategyConfig>
+    <Params name="refreshRate_strategy_config">
+      <Strategy name="strategy_standard" min="60" max="60" dynamicMode="0"/>
+      <Strategy name="strategy_medium" min="90" max="90" dynamicMode="0"/>
+      <Strategy name="strategy_high" min="120" max="120" dynamicMode="0"/>
+      <Strategy name="strategy_auto" min="60" max="120" dynamicMode="0"/>
+    </Params>
+  </RefreshRateStrategyConfig>
+</HgmConfig>

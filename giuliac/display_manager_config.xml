@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- SPDX-License-Identifier: Apache-2.0
+     Display manager geometry for OnePlus Ace 5 (giuliac / PKG110).
+     Physical size: 1264x2780, density: 560 dpi, centered top punch-hole.
+-->
+<DisplayManagerConfig>
+  <dpi>560</dpi>
+  <defaultDisplayCutoutPath>M592 0 L672 0 L672 80 L592 80 Z</defaultDisplayCutoutPath>
+  <cutoutArea>592 0 80 80</cutoutArea>
+  <isWaterfallDisplay>false</isWaterfallDisplay>
+  <curvedScreenBoundary>0 0 0 0</curvedScreenBoundary>
+</DisplayManagerConfig>
