@@ -557,7 +557,7 @@ int main(int argc, char **argv)
     rootpath(target, sizeof(target), "/dev/block/userdata_gsi");
     if (mknod(target, S_IFBLK | 0600, data)) fatal("DSU data node");
     root_mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
-    root_mount("sysfs", "/sys", "sysfs", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
+    root_mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV, NULL);
     char data_target[512];
     rootpath(data_target, sizeof(data_target), "/data");
     int data_fd = open(target, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -608,6 +608,19 @@ int main(int argc, char **argv)
     if (!access("/hmos/ui/hgm_policy_config.xml", F_OK)) root_bind("/hmos/ui/hgm_policy_config.xml", "/sys_prod/etc/graphic/hgm_policy_config.xml", true);
     isolate_devices();
     root_directory("/sys/fs/selinux", 0755);
+    if (!access("/sys/fs/selinux", F_OK)) {
+        root_bind("/sys/fs/selinux", "/sys/fs/selinux", false);
+        log_line("bound stock selinuxfs into new root /sys/fs/selinux");
+    }
+    // Switch kernel SELinux to Permissive to allow OpenHarmony policy.31 / vendor init without panic
+    int ef = open("/sys/fs/selinux/enforce", O_WRONLY | O_CLOEXEC);
+    if (ef >= 0) {
+        write(ef, "0", 1);
+        close(ef);
+        log_line("switched kernel SELinux to Permissive (0)");
+    } else {
+        log_line("note: could not open /sys/fs/selinux/enforce for write (errno=%d)", errno);
+    }
     root_directory("/dev/cgroup", 0755);
     root_mount("cgroup2", "/dev/cgroup", "cgroup2", MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL);
     log_line("executing full donor init --second-stage; target: SceneBoard/Ace 5");
